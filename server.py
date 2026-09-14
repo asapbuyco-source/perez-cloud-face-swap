@@ -150,6 +150,8 @@ async def ws_frame(ws: WebSocket):
             if not ok:
                 continue
             frames += 1
+            if frames % 25 == 0:
+                log.info("swapped %d frames, %s ms/frame, ~%.1f fps", frames, round(last_swap * 1000, 1), round(frames / max(time.time() - t0, 0.001), 1))
             await ws.send_text(json.dumps({
                 "type": "frame",
                 "b64": base64.b64encode(jpg.tobytes()).decode(),
