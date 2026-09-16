@@ -125,13 +125,13 @@ def _swap_frame(emb: np.ndarray, frame_bgr: np.ndarray) -> np.ndarray:
         return frame_bgr
     target_face = max(faces, key=lambda f: f.bbox[3] - f.bbox[1])  # largest face
 
-    # InsightFace swapper expects a source Face with normed_embedding set.
-    # Build one from the stored embedding on a scratch Face instance.
+    # Source face: reuse the target's geometry, swap in the user's identity
+    # embedding. normed_embedding is a read-only property derived from
+    # `embedding`, so we only set `embedding` (the swapper normalizes again).
     from insightface.app.common import Face  # noqa: PLC0415
 
-    src = Face()
+    src = Face(bbox=target_face.bbox, kps=target_face.kps, det_score=1.0)
     src.embedding = emb
-    src.normed_embedding = emb / (np.linalg.norm(emb) + 1e-9)
 
     swapped = _swapper.get(frame_bgr, target_face, src, paste_back=True)
     if swapped is None:
