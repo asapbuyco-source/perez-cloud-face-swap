@@ -101,15 +101,15 @@ def _embed(face_img_bgr: np.ndarray):
 
 
 def _enhance(face_bgr: np.ndarray) -> np.ndarray:
-    """GFPGAN v1.4: restore detail of the swapped face. Runs at 256x256 for
-    speed (the input crop is usually small); 512 only when the face is big."""
+    """GFPGAN v1.4: restore detail of the swapped face. The ONNX model is
+    fixed at 512x512 input. Throttling (every Nth frame) is the speed lever."""
     if _gfpgan is None:
         return face_bgr
     h, w = face_bgr.shape[:2]
-    S = 512 if max(h, w) >= 400 else 256
+    S = 512
     resized = cv2.resize(face_bgr, (S, S))
     rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-    inp = rgb.transpose(2, 0, 1)[None].astype(np.float32)  # 1,3,S,S
+    inp = rgb.transpose(2, 0, 1)[None].astype(np.float32)  # 1,3,512,512
     out = _gfpgan.run(None, {_gfpgan.get_inputs()[0].name: inp})[0][0]
     out = (out.transpose(1, 2, 0) * 255.0).clip(0, 255).astype(np.uint8)
     out_bgr = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
