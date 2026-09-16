@@ -65,6 +65,31 @@ def _b64_to_jpeg(b64: str) -> np.ndarray:
     return cv2.imdecode(arr, cv2.IMREAD_COLOR)
 
 
+# Haar cascade for frontal face detection (bundled with opencv-python-headless).
+_cascade = None
+
+
+def _get_cascade():
+    global _cascade
+    if _cascade is None:
+        import os
+        p = os.path.join(os.path.dirname(cv2.__file__), "data", "haarcascade_frontalface_default.xml")
+        _cascade = cv2.CascadeClassifier(p)
+    return _cascade
+
+
+def _detect_face(frame_bgr: np.ndarray):
+    """Returns (x, y, w, h) of the largest frontal face, or None."""
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    faces = _get_cascade().detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
+    if len(faces) == 0:
+        return None
+    # largest face
+    faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
+    x, y, w, h = faces[0]
+    return int(x), int(y), int(w), int(h)
+
+
 def _embed(face_bgr: np.ndarray) -> np.ndarray:
     """ArcFace embedding from a BGR image (any size, centered 112 crop)."""
     h, w = face_bgr.shape[:2]
@@ -144,9 +169,42 @@ async def ws_frame(ws: WebSocket):
                 continue
             frame = _b64_to_jpeg(msg["b64"])
             t = time.time()
-            swapped = _swap(emb, frame)
+            box = _detect_face(frame)
+            if box is None:
+                # no face: pass the frame through untouched
+                ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                if not ok:
+                    continue
+                frames += 1
+                await ws.send_text(json.dumps({
+                    "type": "frame",
+                    "b64": base64.b64encode(jpg.tobytes()).decode(),
+                    "w": frame.shape[1],
+                    "h": frame.shape[0],
+                    "face": None,
+                }))
+                continue
+            fx, fy, fw, fh = box
+            # pad the crop a bit so the hairline blends
+            pad = 0.3
+            cx, cy = fx + fw / 2, fy + fh / 2
+            half = max(fw, fh) * (1 + pad) / 2
+            x0 = max(0, int(cx - half))
+            y0 = max(0, int(cy - half))
+            x1 = min(frame.shape[1], int(cx + half))
+            y1 = min(frame.shape[0], int(cy + half))
+            crop = frame[y0:y1, x0:x1]
+            swapped_crop = _swap(emb, crop) if crop.size else crop
+            # paste the swapped crop back onto the full-res frame
+            out = frame.copy()
+            sh, sw = swapped_crop.shape[:2]
+            ch, cw = crop.shape[:2]
+            if sh >= ch and sw >= cw:
+                out[y0:y0 + ch, x0:x0 + cw] = swapped_crop[:ch, :cw]
+            else:
+                out[y0:y0 + sh, x0:x0 + sw] = swapped_crop
             last_swap = time.time() - t
-            ok, jpg = cv2.imencode(".jpg", swapped, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            ok, jpg = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, 80])
             if not ok:
                 continue
             frames += 1
@@ -155,8 +213,8 @@ async def ws_frame(ws: WebSocket):
             await ws.send_text(json.dumps({
                 "type": "frame",
                 "b64": base64.b64encode(jpg.tobytes()).decode(),
-                "w": swapped.shape[1],
-                "h": swapped.shape[0],
+                "w": out.shape[1],
+                "h": out.shape[0],
                 "swap_ms": round(last_swap * 1000, 1),
                 "fps": round(frames / max(time.time() - t0, 0.001), 1),
             }))
