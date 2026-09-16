@@ -22,6 +22,7 @@ import base64
 import io
 import json
 import logging
+import os
 import time
 
 import cv2
@@ -50,8 +51,11 @@ app.add_middleware(
 providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
 arcface = ort.InferenceSession(f"{MODEL_DIR}/w600k_r50.onnx", providers=providers)
 inswapper = ort.InferenceSession(f"{MODEL_DIR}/inswapper_128.onnx", providers=providers)
-log.info("Models loaded. arcface input: %s, inswapper inputs: %s",
-         arcface.get_inputs()[0].name, [i.name for i in inswapper.get_inputs()])
+gfpgan = None
+if os.path.exists(f"{MODEL_DIR}/gfpgan_1.4.onnx"):
+    gfpgan = ort.InferenceSession(f"{MODEL_DIR}/gfpgan_1.4.onnx", providers=providers)
+log.info("Models loaded. arcface input: %s, inswapper inputs: %s, gfpgan: %s",
+         arcface.get_inputs()[0].name, [i.name for i in inswapper.get_inputs()], bool(gfpgan))
 
 _face_cache: dict[str, np.ndarray] = {}  # client_id -> embedding
 
@@ -115,6 +119,37 @@ def _swap(src_emb: np.ndarray, frame_bgr: np.ndarray) -> np.ndarray:
     out = ((out + 1.0) / 2.0 * 255.0).clip(0, 255).astype(np.uint8).transpose(1, 2, 0)
     out_bgr = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
     return out_bgr
+
+
+def _enhance(face_bgr: np.ndarray) -> np.ndarray:
+    """GFPGAN v1.4: restore detail/clarity of the swapped face. 512x512."""
+    if gfpgan is None:
+        return face_bgr
+    S = 512
+    resized = cv2.resize(face_bgr, (S, S))
+    rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    inp = rgb.transpose(2, 0, 1)[None].astype(np.float32)  # 1,3,512,512
+    out = gfpgan.run(None, {gfpgan.get_inputs()[0].name: inp})[0][0]
+    out = (out.transpose(1, 2, 0) * 255.0).clip(0, 255).astype(np.uint8)
+    out_bgr = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
+    return cv2.resize(out_bgr, (face_bgr.shape[1], face_bgr.shape[0]))
+
+
+def _feathered_paste(base: np.ndarray, patch: np.ndarray, x0: int, y0: int, feather: int = 25) -> None:
+    """Paste patch onto base with a feathered elliptical alpha mask (no hard box)."""
+    ph, pw = patch.shape[:2]
+    x0 = max(0, min(x0, base.shape[1] - pw))
+    y0 = max(0, min(y0, base.shape[0] - ph))
+    mask = np.zeros((ph, pw), dtype=np.float32)
+    center = (pw / 2, ph / 2)
+    axes = (max(pw / 2 - feather, 1), max(ph / 2 - feather, 1))
+    cv2.ellipse(mask, center, axes, 0, 0, 360, 1.0, -1)
+    # soft feather border
+    kernel = cv2.getGaussianKernel(feather * 2 + 1, feather / 3)
+    mask = cv2.filter2D(mask, -1, kernel)
+    mask = np.clip(mask, 0, 1)[:, :, None].astype(np.float32)
+    region = base[y0:y0 + ph, x0:x0 + pw].astype(np.float32)
+    base[y0:y0 + ph, x0:x0 + pw] = (patch.astype(np.float32) * mask + region * (1 - mask)).astype(np.uint8)
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +221,7 @@ async def ws_frame(ws: WebSocket):
                 continue
             fx, fy, fw, fh = box
             # pad the crop a bit so the hairline blends
-            pad = 0.3
+            pad = 0.35
             cx, cy = fx + fw / 2, fy + fh / 2
             half = max(fw, fh) * (1 + pad) / 2
             x0 = max(0, int(cx - half))
@@ -195,14 +230,11 @@ async def ws_frame(ws: WebSocket):
             y1 = min(frame.shape[0], int(cy + half))
             crop = frame[y0:y1, x0:x1]
             swapped_crop = _swap(emb, crop) if crop.size else crop
-            # paste the swapped crop back onto the full-res frame
+            # GFPGAN: restore detail on the swapped face
+            swapped_crop = _enhance(swapped_crop)
+            # feathered paste back onto the full-res frame (no hard box)
             out = frame.copy()
-            sh, sw = swapped_crop.shape[:2]
-            ch, cw = crop.shape[:2]
-            if sh >= ch and sw >= cw:
-                out[y0:y0 + ch, x0:x0 + cw] = swapped_crop[:ch, :cw]
-            else:
-                out[y0:y0 + sh, x0:x0 + sw] = swapped_crop
+            _feathered_paste(out, swapped_crop, x0, y0)
             last_swap = time.time() - t
             ok, jpg = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, 80])
             if not ok:

@@ -5,6 +5,7 @@ import urllib.request
 URLS = {
     "models/inswapper_128.onnx": "https://huggingface.co/ezioruan/inswapper_128.onnx/resolve/main/inswapper_128.onnx",
     "models/w600k_r50.onnx": "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
+    "models/gfpgan_1.4.onnx": "https://github.com/facefusion/facefusion-assets/releases/download/models-3.0.0/gfpgan_1.4.onnx",
 }
 
 os.makedirs("models", exist_ok=True)
