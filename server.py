@@ -140,16 +140,17 @@ def _feathered_paste(base: np.ndarray, patch: np.ndarray, x0: int, y0: int, feat
     ph, pw = patch.shape[:2]
     x0 = max(0, min(x0, base.shape[1] - pw))
     y0 = max(0, min(y0, base.shape[0] - ph))
-    mask = np.zeros((ph, pw), dtype=np.float32)
-    center = (pw / 2, ph / 2)
-    axes = (max(pw / 2 - feather, 1), max(ph / 2 - feather, 1))
-    cv2.ellipse(mask, center, axes, 0, 0, 360, 1.0, -1)
+    mask = np.zeros((ph, pw), dtype=np.uint8)
+    center = (pw // 2, ph // 2)
+    axes = (max(pw // 2 - feather, 1), max(ph // 2 - feather, 1))
+    cv2.ellipse(mask, center, axes, 0, 0, 360, 255, -1)
     # soft feather border
     kernel = cv2.getGaussianKernel(feather * 2 + 1, feather / 3)
     mask = cv2.filter2D(mask, -1, kernel)
-    mask = np.clip(mask, 0, 1)[:, :, None].astype(np.float32)
+    mask = np.clip(mask, 0, 255).astype(np.float32) / 255.0
+    mask3 = mask[:, :, None].astype(np.float32)
     region = base[y0:y0 + ph, x0:x0 + pw].astype(np.float32)
-    base[y0:y0 + ph, x0:x0 + pw] = (patch.astype(np.float32) * mask + region * (1 - mask)).astype(np.uint8)
+    base[y0:y0 + ph, x0:x0 + pw] = (patch.astype(np.float32) * mask3 + region * (1 - mask3)).astype(np.uint8)
 
 
 # ---------------------------------------------------------------------------
