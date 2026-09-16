@@ -13,6 +13,7 @@ import os
 import sys
 import logging
 import threading
+import time
 
 import cv2
 import numpy as np
@@ -39,6 +40,13 @@ log = logging.getLogger("dlc")
 _logger_ready = False
 _source_face_lock = threading.Lock()
 _source_face = None
+
+# Motion-gated enhancement: re-run GFPGAN only when the face actually moved.
+_enh_lock = threading.Lock()
+_enh_last_bbox = None  # (x0, y0, x1, y1) of last enhanced frame
+_enh_last_time = 0.0
+ENH_MOVE_PX = 6.0       # face must move > this many px to re-enhance
+ENH_MAX_AGE = 1.5       # force a refresh at least every N seconds (drift/sharpness)
 
 
 def init(source_photo_bgr: np.ndarray | None = None) -> None:
@@ -76,6 +84,36 @@ def set_source_photo(photo_bgr: np.ndarray) -> bool:
     return True
 
 
+def _face_moved_enough(frame_bgr: np.ndarray) -> bool:
+    """Should we re-run the (expensive) enhancer on this frame?
+
+    Uses the same analyser as the swapper (leftmost face). Returns True when
+    the face moved > ENH_MOVE_PX since the last enhancement, or when the last
+    enhancement is older than ENH_MAX_AGE (freshness/quality guarantee).
+    """
+    global _enh_last_bbox, _enh_last_time
+    face = get_one_face(frame_bgr)
+    if face is None:
+        return False
+    bbox = face.bbox.astype(np.float32)
+    now = time.time()
+    with _enh_lock:
+        last = _enh_last_bbox
+        last_t = _enh_last_time
+        if last is not None:
+            moved = (
+                abs(bbox[0] - last[0]) > ENH_MOVE_PX
+                or abs(bbox[1] - last[1]) > ENH_MOVE_PX
+                or abs(bbox[2] - last[2]) > ENH_MOVE_PX
+                or abs(bbox[3] - last[3]) > ENH_MOVE_PX
+            )
+            if not moved and (now - last_t) < ENH_MAX_AGE:
+                return False
+        _enh_last_bbox = bbox.copy()
+        _enh_last_time = now
+    return True
+
+
 def process_frame(frame_bgr: np.ndarray, enhance: bool = True) -> np.ndarray:
     """DLC's live pipeline: swap (their mask/blend/sharpen), then enhance."""
     with _source_face_lock:
@@ -84,7 +122,7 @@ def process_frame(frame_bgr: np.ndarray, enhance: bool = True) -> np.ndarray:
         return frame_bgr
 
     out = face_swapper.process_frame(source, frame_bgr)
-    if enhance:
+    if enhance and _face_moved_enough(out):
         try:
             out = face_enhancer.process_frame(source, out)
         except Exception as e:  # noqa: BLE001

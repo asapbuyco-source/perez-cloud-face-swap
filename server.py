@@ -80,7 +80,6 @@ async def ws_frame(ws: WebSocket):
     await ws.accept()
     frames = 0
     t0 = time.time()
-    enhance_every = 3  # GFPGAN every Nth frame (speed vs sharpness)
     try:
         while True:
             raw = await ws.receive_text()
@@ -101,9 +100,9 @@ async def ws_frame(ws: WebSocket):
                 continue
             frame = _b64_to_jpeg(msg["b64"])
             t = time.time()
-            out = dlc_engine.process_frame(frame, enhance=(frames % enhance_every == 0))
+            out = dlc_engine.process_frame(frame, enhance=True)
             elapsed = time.time() - t
-            ok, jpg = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            ok, jpg = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, 82])
             if not ok:
                 continue
             frames += 1
