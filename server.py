@@ -125,17 +125,9 @@ def _swap_frame(emb: np.ndarray, frame_bgr: np.ndarray) -> np.ndarray:
         return frame_bgr
     target_face = max(faces, key=lambda f: f.bbox[3] - f.bbox[1])  # largest face
 
-    # make a source Face object from the embedding
-    source = target_face.copy()  # placeholder replaced below
-    try:
-        from insightface.app import FaceAnalysis as _FA
-        src_face = _FA._dummy  # noqa
-    except Exception:  # noqa: BLE001
-        pass
-
     # InsightFace swapper expects a source Face with normed_embedding set.
     # Build one from the stored embedding on a scratch Face instance.
-    from insightface.common.face import Face  # noqa: PLC0415
+    from insightface.app.common import Face  # noqa: PLC0415
 
     src = Face()
     src.embedding = emb
