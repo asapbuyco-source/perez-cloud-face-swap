@@ -4,3 +4,5 @@ onnxruntime-gpu==1.20.0
 opencv-python-headless==4.10.0.84
 numpy<2.0
 pydantic==2.10.4
+insightface==0.7.3
+onnx==1.17.0
