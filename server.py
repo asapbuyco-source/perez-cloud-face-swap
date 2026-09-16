@@ -101,20 +101,22 @@ def _embed(face_img_bgr: np.ndarray):
 
 
 def _enhance(face_bgr: np.ndarray) -> np.ndarray:
-    """GFPGAN v1.4: restore detail/clarity of the swapped face. 512x512."""
+    """GFPGAN v1.4: restore detail of the swapped face. Runs at 256x256 for
+    speed (the input crop is usually small); 512 only when the face is big."""
     if _gfpgan is None:
         return face_bgr
-    S = 512
+    h, w = face_bgr.shape[:2]
+    S = 512 if max(h, w) >= 400 else 256
     resized = cv2.resize(face_bgr, (S, S))
     rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-    inp = rgb.transpose(2, 0, 1)[None].astype(np.float32)  # 1,3,512,512
+    inp = rgb.transpose(2, 0, 1)[None].astype(np.float32)  # 1,3,S,S
     out = _gfpgan.run(None, {_gfpgan.get_inputs()[0].name: inp})[0][0]
     out = (out.transpose(1, 2, 0) * 255.0).clip(0, 255).astype(np.uint8)
     out_bgr = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
-    return cv2.resize(out_bgr, (face_bgr.shape[1], face_bgr.shape[0]))
+    return cv2.resize(out_bgr, (w, h))
 
 
-def _swap_frame(emb: np.ndarray, frame_bgr: np.ndarray) -> np.ndarray:
+def _swap_frame(emb: np.ndarray, frame_bgr: np.ndarray, enhance: bool = True) -> np.ndarray:
     """Swap the face in a full-res frame using insightface's paste_back, then
     enhance with GFPGAN and blend back with a landmark mask."""
     if _fa is None or _swapper is None:
@@ -154,17 +156,18 @@ def _swap_frame(emb: np.ndarray, frame_bgr: np.ndarray) -> np.ndarray:
         mm = cv2.GaussianBlur(mm, (7, 7), 3)
         mask[mm > 128] = 0  # hole at the mouth -> keep original talking mouth
 
-    # GFPGAN enhance the swapped face region only
-    y_idx, x_idx = np.where(mask > 0)
-    if len(x_idx) > 0:
-        y0, y1 = int(y_idx.min()), int(y_idx.max()) + 1
-        x0, x1 = int(x_idx.min()), int(x_idx.max()) + 1
-        pad = 20
-        y0, y1 = max(0, y0 - pad), min(frame_bgr.shape[0], y1 + pad)
-        x0, x1 = max(0, x0 - pad), min(frame_bgr.shape[1], x1 + pad)
-        face_crop = swapped[y0:y1, x0:x1]
-        enhanced = _enhance(face_crop)
-        swapped[y0:y1, x0:x1] = enhanced
+    # GFPGAN enhance the swapped face region (throttled)
+    if enhance:
+        y_idx, x_idx = np.where(mask > 0)
+        if len(x_idx) > 0:
+            y0, y1 = int(y_idx.min()), int(y_idx.max()) + 1
+            x0, x1 = int(x_idx.min()), int(x_idx.max()) + 1
+            pad = 20
+            y0, y1 = max(0, y0 - pad), min(frame_bgr.shape[0], y1 + pad)
+            x0, x1 = max(0, x0 - pad), min(frame_bgr.shape[1], x1 + pad)
+            face_crop = swapped[y0:y1, x0:x1]
+            enhanced = _enhance(face_crop)
+            swapped[y0:y1, x0:x1] = enhanced
 
     # feathered alpha blend
     mask_f = (mask.astype(np.float32) / 255.0)[:, :, None]
@@ -203,6 +206,7 @@ async def ws_frame(ws: WebSocket):
     emb: np.ndarray | None = None
     frames = 0
     t0 = time.time()
+    enhance_every = 3  # GFPGAN every Nth frame (speed vs sharpness)
     try:
         while True:
             raw = await ws.receive_text()
@@ -220,7 +224,7 @@ async def ws_frame(ws: WebSocket):
                 continue
             frame = _b64_to_jpeg(msg["b64"])
             t = time.time()
-            out = _swap_frame(emb, frame)
+            out = _swap_frame(emb, frame, enhance=(frames % enhance_every == 0))
             elapsed = time.time() - t
             ok, jpg = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, 80])
             if not ok:
